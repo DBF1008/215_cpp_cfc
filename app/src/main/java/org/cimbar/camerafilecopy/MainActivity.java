@@ -41,6 +41,13 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     private String dataPath;
     private String activePath;
 
+    /**
+     * Guards against onCameraFrame() racing with native decoder teardown.
+     * Set to true before shutdownJNI() is called; cleared in onResume().
+     * Volatile ensures visibility across the camera worker thread and UI thread.
+     */
+    private volatile boolean mDecoderShutdown = false;
+
     public MainActivity() {
         Log.i(TAG, "Instantiated new " + this.getClass());
     }
@@ -107,16 +114,31 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     @Override
     public void onPause()
     {
-        shutdownJNI();
+        // 1. Stop the camera FIRST — this disables the preview callback so no new
+        //    onCameraFrame() calls will be dispatched. CameraActivity.onPause()
+        //    calls disableView() on every view returned by getCameraViewList().
         super.onPause();
         if (mOpenCvCameraView != null)
-            mOpenCvCameraView.disableView();
+            mOpenCvCameraView.disableView();  // idempotent; belt-and-suspenders
+
+        // 2. Mark the decoder as shutting down. This is the Java-side guard that
+        //    prevents any in-flight onCameraFrame() from calling into native code
+        //    after the decoder has been torn down.
+        mDecoderShutdown = true;
+
+        // 3. NOW it is safe to tear down the native decoder. Any frames already
+        //    in flight will see mDecoderShutdown==true and bail out.
+        shutdownJNI();
     }
 
     @Override
     public void onResume()
     {
         super.onResume();
+        // Clear the shutdown guard BEFORE re-enabling the camera so that
+        // onCameraFrame() is allowed to process frames again.
+        mDecoderShutdown = false;
+        resumeJNI();  // reset the C++ side shutdown flag
         if (mOpenCvCameraView != null)
             mOpenCvCameraView.enableView();
     }
@@ -128,10 +150,12 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
     @Override
     public void onDestroy() {
-        shutdownJNI();
-        super.onDestroy();
+        // Stop camera first (idempotent — onPause already did this, but be safe)
         if (mOpenCvCameraView != null)
             mOpenCvCameraView.disableView();
+        mDecoderShutdown = true;
+        shutdownJNI();
+        super.onDestroy();
     }
 
     @Override
@@ -146,6 +170,11 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     public Mat onCameraFrame(CvCameraViewFrame frame) {
         // get current camera frame as OpenCV Mat object
         Mat mat = frame.rgba();
+
+        // If we're shutting down (or already shut down), don't call into native
+        // code — the decoder may have been stopped or nullified.
+        if (mDecoderShutdown)
+            return mat;
 
         // native call to process current camera frame
         String res = processImageJNI(mat.getNativeObjAddr(), this.dataPath, this.modeVal);
@@ -217,6 +246,7 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
     private native String processImageJNI(long mat, String path, int modeInt);
     private native void shutdownJNI();
+    private native void resumeJNI();
 
     @Override
     public boolean onTouchEvent(MotionEvent event){

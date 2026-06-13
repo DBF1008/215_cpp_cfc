@@ -24,6 +24,8 @@ namespace {
 	std::mutex _mutex; // for _proc
 	std::set<std::string> _completed;
 
+	bool _shutdown = false;  // when true, processImageJNI must not touch/create _proc
+
 	unsigned _calls = 0;
 	int _transferStatus = 0;
 	clock_t _frameDecodeSnapshot = 0;
@@ -175,6 +177,10 @@ Java_org_cimbar_camerafilecopy_MainActivity_processImageJNI(JNIEnv *env, jobject
 	std::shared_ptr<MultiThreadedDecoder> proc;
 	{
 		std::lock_guard<std::mutex> lock(_mutex);
+		// Defense-in-depth: if shutdown is in progress (or already done),
+		// do NOT create a new decoder. Return an empty result immediately.
+		if (_shutdown)
+			return env->NewStringUTF("");
 		if (!_proc or !_proc->set_mode(modeVal))
 			_proc = std::make_shared<MultiThreadedDecoder>(dataPath, modeVal);
 		proc = _proc;
@@ -223,9 +229,18 @@ Java_org_cimbar_camerafilecopy_MainActivity_shutdownJNI(JNIEnv *env, jobject ins
 	__android_log_print(ANDROID_LOG_INFO, TAG, "Shutdown cfc-cpp\n");
 
 	std::lock_guard<std::mutex> lock(_mutex);
+	_shutdown = true;  // prevent processImageJNI from creating a new decoder
 	if (_proc)
 		_proc->stop();
 	_proc = nullptr;
+}
+
+void JNICALL
+Java_org_cimbar_camerafilecopy_MainActivity_resumeJNI(JNIEnv *env, jobject instance) {
+	__android_log_print(ANDROID_LOG_INFO, TAG, "Resume cfc-cpp\n");
+
+	std::lock_guard<std::mutex> lock(_mutex);
+	_shutdown = false;
 }
 
 }
