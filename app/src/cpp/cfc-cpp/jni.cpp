@@ -22,9 +22,13 @@ using namespace cv;
 namespace {
 	std::shared_ptr<MultiThreadedDecoder> _proc;
 	std::mutex _mutex; // for _proc
-	std::set<std::string> _completed;
 
-	unsigned _calls = 0;
+	// Process-global state: persists for the lifetime of the native library.
+	std::set<std::string> _completed; // files already returned to the user
+	unsigned _calls = 0;              // total frames handed to native since process start
+
+	// Session-scoped state: reset whenever a new decoder (session) is created so the
+	// transfer-status indicator does not bleed across sessions.
 	int _transferStatus = 0;
 	clock_t _frameDecodeSnapshot = 0;
 	clock_t _frameSuccessSnapshot = 0;
@@ -125,17 +129,17 @@ namespace {
 	{
 		std::stringstream sstop;
 		sstop << "cfc using " << proc.num_threads() << " thread(s). " << proc.mode() << ":" << proc.detected_mode() << "..." << proc.backlog() << "? ";
-		sstop << (MultiThreadedDecoder::bytes / std::max<double>(1, MultiThreadedDecoder::decoded)) << "b v0.6.6";
+		sstop << (proc.bytes / std::max<double>(1, proc.decoded)) << "b v0.6.6";
 		std::stringstream ssmid;
-		ssmid << "#: " << MultiThreadedDecoder::perfect << " / " << MultiThreadedDecoder::decoded << " / " << MultiThreadedDecoder::scanned << " / " << _calls;
+		ssmid << "#: " << proc.perfect << " / " << proc.decoded << " / " << proc.scanned << " / " << _calls;
 		std::stringstream ssperf;
-		ssperf << "scan: " << millis(MultiThreadedDecoder::scanTicks, MultiThreadedDecoder::scanned);
-		ssperf << ", extract: " << millis(MultiThreadedDecoder::extractTicks, MultiThreadedDecoder::decoded);
-		ssperf << ", decode: " << millis(MultiThreadedDecoder::decodeTicks, MultiThreadedDecoder::decoded);
+		ssperf << "scan: " << millis(proc.scanTicks, proc.scanned);
+		ssperf << ", extract: " << millis(proc.extractTicks, proc.decoded);
+		ssperf << ", decode: " << millis(proc.decodeTicks, proc.decoded);
 		std::stringstream sstats;
 		sstats << "Files received: " << proc.files_decoded() << ", in flight: " << proc.files_in_flight() << ". ";
-		sstats << percent(MultiThreadedDecoder::perfect, MultiThreadedDecoder::decoded) << "% decode. ";
-		sstats << percent(MultiThreadedDecoder::decoded, MultiThreadedDecoder::scanned) << "% scan.";
+		sstats << percent(proc.perfect, proc.decoded) << "% decode. ";
+		sstats << percent(proc.decoded, proc.scanned) << "% scan.";
 
 		cv::putText(mat, sstop.str(), cv::Point(5,50), cv::FONT_HERSHEY_DUPLEX, 1, cv::Scalar(255,255,80), 2);
 		cv::putText(mat, ssmid.str(), cv::Point(5,100), cv::FONT_HERSHEY_DUPLEX, 1, cv::Scalar(255,255,80), 2);
@@ -143,11 +147,11 @@ namespace {
 		cv::putText(mat, sstats.str(), cv::Point(5,200), cv::FONT_HERSHEY_DUPLEX, 1, cv::Scalar(255,255,80), 2);
 
 		/*std::stringstream ssperf2;
-		ssperf2 << "reader ctor: " << millis(Decoder::readerInitTicks, MultiThreadedDecoder::decoded);
-		ssperf2 << ", fount: " << millis(Decoder::fountTicks, MultiThreadedDecoder::decoded);
-		ssperf2 << ", dodecode: " << millis(Decoder::decodeTicks, MultiThreadedDecoder::decoded);
-		ssperf2 << ", readloop: " << millis(Decoder::bbTicks, MultiThreadedDecoder::decoded);
-		ssperf2 << ", rss: " << millis(Decoder::rssTicks, MultiThreadedDecoder::decoded);
+		ssperf2 << "reader ctor: " << millis(Decoder::readerInitTicks, proc.decoded);
+		ssperf2 << ", fount: " << millis(Decoder::fountTicks, proc.decoded);
+		ssperf2 << ", dodecode: " << millis(Decoder::decodeTicks, proc.decoded);
+		ssperf2 << ", readloop: " << millis(Decoder::bbTicks, proc.decoded);
+		ssperf2 << ", rss: " << millis(Decoder::rssTicks, proc.decoded);
 		cv::putText(mat, ssperf2.str(), cv::Point(5,300), cv::FONT_HERSHEY_DUPLEX, 1, cv::Scalar(255,255,80), 2);
 		//*/
 	}
@@ -176,7 +180,13 @@ Java_org_cimbar_camerafilecopy_MainActivity_processImageJNI(JNIEnv *env, jobject
 	{
 		std::lock_guard<std::mutex> lock(_mutex);
 		if (!_proc or !_proc->set_mode(modeVal))
+		{
 			_proc = std::make_shared<MultiThreadedDecoder>(dataPath, modeVal);
+			// new session: drop the previous session's transfer-status snapshots
+			_frameDecodeSnapshot = 0;
+			_frameSuccessSnapshot = 0;
+			_transferStatus = 0;
+		}
 		proc = _proc;
 	}
 

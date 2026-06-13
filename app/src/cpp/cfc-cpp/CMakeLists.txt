@@ -5,6 +5,7 @@ add_library(cfc-cpp
 
         jni.cpp
         MultiThreadedDecoder.h
+        AutoMode.h
 )
 
 find_library(log-lib
@@ -25,3 +26,9 @@ target_link_libraries(cfc-cpp
 )
 
 target_compile_options(cfc-cpp  PUBLIC "-DZSTD_STATIC_LINKING_ONLY")
+
+# Host-side regression tests for the dependency-free autodetect mode rotation.
+# Skipped in the Android build, which sets DISABLE_TESTS.
+if(NOT DEFINED DISABLE_TESTS)
+        add_subdirectory(test)
+endif()

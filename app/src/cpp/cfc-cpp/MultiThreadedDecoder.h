@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AutoMode.h"
 #include "compression/zstd_decompressor.h"
 #include "encoder/Decoder.h"
 #include "extractor/Anchor.h"
@@ -17,14 +18,16 @@ class MultiThreadedDecoder
 public:
 	MultiThreadedDecoder(std::string data_path, int mode_val);
 
-	inline static clock_t count = 0;
-	inline static clock_t bytes = 0;
-	inline static clock_t perfect = 0;
-	inline static clock_t decoded = 0;
-	inline static clock_t decodeTicks = 0;
-	inline static clock_t scanned = 0;
-	inline static clock_t scanTicks = 0;
-	inline static clock_t extractTicks = 0;
+	// Session-scoped decode statistics. These are per-instance (not static), so a
+	// freshly constructed decoder -- i.e. a new session -- starts from zero instead
+	// of inheriting the previous session's totals.
+	clock_t bytes = 0;
+	clock_t perfect = 0;
+	clock_t decoded = 0;
+	clock_t decodeTicks = 0;
+	clock_t scanned = 0;
+	clock_t scanTicks = 0;
+	clock_t extractTicks = 0;
 
 	bool add(cv::Mat mat);
 
@@ -50,6 +53,7 @@ protected:
 protected:
 	int _modeVal;
 	int _detectedMode;
+	cfc::AutoModeCycler _cycler; // session-scoped autodetect mode rotation
 
 	Decoder _dec;
 	unsigned _numThreads;
@@ -98,24 +102,7 @@ inline int MultiThreadedDecoder::do_extract(const cv::Mat& mat, cv::Mat& img)
 
 inline bool MultiThreadedDecoder::add(cv::Mat mat)
 {
-    ++count;
-    unsigned modeVal = _modeVal;
-    if (modeVal == 0)
-    {
-        switch (count%4) {
-            case 1:
-                modeVal = 4;
-                break;
-            case 2:
-                modeVal = 66;
-                break;
-            case 3:
-                modeVal = 67;
-                break;
-            default:
-                modeVal = 68;
-        }
-    }
+    unsigned modeVal = _cycler.next(_modeVal);
     return _pool.try_execute( [&, mat, modeVal] () {
 		cimbar::Config::update(modeVal);
 		cv::Mat img;
