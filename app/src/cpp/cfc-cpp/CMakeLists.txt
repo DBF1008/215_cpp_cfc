@@ -25,3 +25,9 @@ target_link_libraries(cfc-cpp
 )
 
 target_compile_options(cfc-cpp  PUBLIC "-DZSTD_STATIC_LINKING_ONLY")
+
+# Host-only unit tests for the JNI-independent session state. Skipped in the
+# Android build, which sets DISABLE_TESTS.
+if(NOT DISABLE_TESTS)
+	add_subdirectory(test build/test)
+endif()

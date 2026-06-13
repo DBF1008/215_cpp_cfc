@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(g++ -std=c++17 -Wall -Wextra -I app/src/cpp/cfc-cpp -I app/src/cpp/libcimbar/test app/src/cpp/cfc-cpp/test/test.cpp app/src/cpp/cfc-cpp/test/DecodeSessionTest.cpp -o /tmp/decode_session_test)",
+      "Bash(/tmp/decode_session_test)"
+    ]
+  }
+}
