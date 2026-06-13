@@ -4,4 +4,6 @@
     <string name="mode_b">Mode B</string>
     <string name="mode_bm">Mode Bm</string>
     <string name="mode_bu">Mode Bu</string>
+    <string name="save_succeeded">File saved</string>
+    <string name="save_failed">Couldn\'t save the file. It was kept so you can try again.</string>
 </resources>

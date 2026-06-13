@@ -9,6 +9,7 @@ import org.opencv.android.CameraBridgeViewBase.CvCameraViewListener2;
 
 import android.annotation.SuppressLint;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.GestureDetector;
@@ -20,9 +21,6 @@ import android.widget.Toast;
 import androidx.annotation.Nullable;
 import androidx.core.view.GestureDetectorCompat;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Collections;
 import java.util.List;
@@ -30,6 +28,7 @@ import java.util.List;
 public class MainActivity extends CameraActivity implements CvCameraViewListener2 {
     private static final String TAG = "cfc::MainActivity";
     private static final int CREATE_FILE = 11;
+    private static final String STATE_ACTIVE_PATH = "cfc.activePath";
 
     private GestureDetectorCompat mDetector;
     private Toast introToast;
@@ -50,6 +49,12 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     public void onCreate(Bundle savedInstanceState) {
         Log.i(TAG, "called onCreate");
         super.onCreate(savedInstanceState);
+
+        // Restore the pending save target so a transfer survives Activity recreation
+        // (e.g. if the process is rebuilt while the system file picker is in front).
+        if (savedInstanceState != null) {
+            this.activePath = savedInstanceState.getString(STATE_ACTIVE_PATH);
+        }
 
         //! [ocv_loader_init]
         if (OpenCVLoader.initLocal()) {
@@ -188,31 +193,69 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        if (resultCode == RESULT_OK && requestCode == CREATE_FILE) {
-            if (this.activePath == null)
-                return;
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        // Persist the pending save target so it survives Activity recreation while the
+        // system file picker is in the foreground.
+        outState.putString(STATE_ACTIVE_PATH, this.activePath);
+    }
 
-            // copy this.activePath (tempfile) to the user-specified location
-            try (
-                    InputStream istream = new FileInputStream(this.activePath);
-                    OutputStream ostream = getContentResolver().openOutputStream(data.getData())
-            ) {
-                byte[] buf = new byte[8192];
-                int length;
-                while ((length = istream.read(buf)) > 0) {
-                    ostream.write(buf, 0, length);
-                }
-                ostream.flush();
-            } catch (Exception e) {
-                Log.e(TAG, "failed to write file " + e.toString());
-            } finally {
-                try {
-                    new File(this.activePath).delete();
-                } catch (Exception e) {}
-                this.activePath = null;
-            }
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != CREATE_FILE)
+            return;
+
+        final String pendingPath = this.activePath;
+
+        // Anything other than RESULT_OK (cancelled, dismissed, picker failure) must leave
+        // the received file in place so the user can try saving it again.
+        if (resultCode != RESULT_OK)
+            return;
+
+        if (pendingPath == null) {
+            // No record of what to save -- e.g. the process was killed and the path could
+            // not be restored. There is nothing we can safely write, but nothing is lost.
+            Log.w(TAG, "CREATE_FILE result with no pending file to save");
+            return;
         }
+
+        // Don't assume RESULT_OK guarantees a usable destination: data, its Uri, and the
+        // opened stream can each be null. On any of these, keep the temp file for a retry.
+        Uri target = (data == null) ? null : data.getData();
+        if (target == null) {
+            Log.e(TAG, "CREATE_FILE returned OK without a destination; keeping " + pendingPath);
+            notifySaveFailed();
+            return;
+        }
+
+        OutputStream ostream = null;
+        try {
+            ostream = getContentResolver().openOutputStream(target);
+        } catch (Exception e) {
+            Log.e(TAG, "failed to open destination: " + e);
+        }
+        if (ostream == null) {
+            Log.e(TAG, "destination stream was null; keeping " + pendingPath);
+            notifySaveFailed();
+            return;
+        }
+
+        // FileSaveHelper deletes the temp file only if the copy fully succeeds, so a
+        // failure here never destroys the received data.
+        boolean saved = FileSaveHelper.saveAndCleanup(pendingPath, ostream);
+        if (saved) {
+            this.activePath = null;
+            Toast.makeText(this, R.string.save_succeeded, Toast.LENGTH_SHORT).show();
+        } else {
+            Log.e(TAG, "failed to save received file; keeping " + pendingPath);
+            notifySaveFailed();
+            // Leave activePath set so the temp file survives and can be retried.
+        }
+    }
+
+    private void notifySaveFailed() {
+        Toast.makeText(this, R.string.save_failed, Toast.LENGTH_LONG).show();
     }
 
     private native String processImageJNI(long mat, String path, int modeInt);
