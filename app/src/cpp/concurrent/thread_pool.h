@@ -19,8 +19,14 @@ public:
 	bool start();
 	void stop();
 
+	// outcome of an attempt to submit work while respecting a queue-size limit
+	enum class enqueue_status { accepted, full, over_limit };
+
 	void execute(std::function<void()> fun);
 	bool try_execute(std::function<void()> fun);
+	// explicit backpressure: drop (over_limit) before enqueueing once the backlog reaches
+	// softLimit, otherwise behave like try_execute (accepted, or full if the queue rejects it).
+	enqueue_status try_execute_within(std::function<void()> fun, size_t softLimit);
 	size_t queued() const;
 
 protected:
@@ -89,6 +95,15 @@ inline bool thread_pool::try_execute(std::function<void()> fun)
 	if (success)
 		_notifyWork.notify_one();
 	return success;
+}
+
+inline thread_pool::enqueue_status thread_pool::try_execute_within(std::function<void()> fun, size_t softLimit)
+{
+	if (queued() >= softLimit)
+		return enqueue_status::over_limit;
+	if (try_execute(std::move(fun)))
+		return enqueue_status::accepted;
+	return enqueue_status::full;
 }
 
 inline size_t thread_pool::queued() const

@@ -11,3 +11,7 @@ include_directories(
 
 add_library(concurrent INTERFACE)
 
+if(NOT DEFINED DISABLE_TESTS)
+	add_subdirectory(test)
+endif()
+

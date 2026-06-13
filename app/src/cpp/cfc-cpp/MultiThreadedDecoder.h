@@ -15,6 +15,9 @@
 class MultiThreadedDecoder
 {
 public:
+	// outcome of submitting a frame for decoding
+	enum class FrameStatus { Enqueued, QueueFull, Dropped };
+
 	MultiThreadedDecoder(std::string data_path, int mode_val);
 
 	inline static clock_t count = 0;
@@ -25,8 +28,10 @@ public:
 	inline static clock_t scanned = 0;
 	inline static clock_t scanTicks = 0;
 	inline static clock_t extractTicks = 0;
+	inline static clock_t queueFull = 0; // frames the worker queue rejected (full)
+	inline static clock_t dropped = 0;   // frames proactively dropped by backpressure
 
-	bool add(cv::Mat mat);
+	FrameStatus add(cv::Mat mat);
 
 	void stop();
 
@@ -36,6 +41,9 @@ public:
 
 	unsigned num_threads() const;
 	unsigned backlog() const;
+	unsigned max_backlog() const;
+	void set_max_backlog(unsigned max_backlog);
+	unsigned frames_dropped() const;
 	unsigned files_in_flight() const;
 	unsigned files_decoded() const;
 	std::vector<std::string> get_done() const;
@@ -53,6 +61,7 @@ protected:
 
 	Decoder _dec;
 	unsigned _numThreads;
+	unsigned _maxBacklog;
 	turbo::thread_pool _pool;
 	concurrent_fountain_decoder_sink _writer;
 	std::string _dataPath;
@@ -64,6 +73,7 @@ inline MultiThreadedDecoder::MultiThreadedDecoder(std::string data_path, int mod
 	, _detectedMode(0)
 	, _dec(cimbar::Config::ecc_bytes(), cimbar::Config::color_bits())
 	, _numThreads(std::max<int>(((int)std::thread::hardware_concurrency()/2), 1))
+	, _maxBacklog(_numThreads * 2)
 	, _pool(_numThreads, 1)
 	, _writer(fountain_chunk_size(mode_val), decompress_on_store<std::ofstream>(data_path, true))
 	, _dataPath(data_path)
@@ -96,7 +106,7 @@ inline int MultiThreadedDecoder::do_extract(const cv::Mat& mat, cv::Mat& img)
 	return Extractor::SUCCESS;
 }
 
-inline bool MultiThreadedDecoder::add(cv::Mat mat)
+inline MultiThreadedDecoder::FrameStatus MultiThreadedDecoder::add(cv::Mat mat)
 {
     ++count;
     unsigned modeVal = _modeVal;
@@ -116,7 +126,7 @@ inline bool MultiThreadedDecoder::add(cv::Mat mat)
                 modeVal = 68;
         }
     }
-    return _pool.try_execute( [&, mat, modeVal] () {
+    turbo::thread_pool::enqueue_status status = _pool.try_execute_within( [&, mat, modeVal] () {
 		cimbar::Config::update(modeVal);
 		cv::Mat img;
 		int res = do_extract(mat, img);
@@ -137,7 +147,19 @@ inline bool MultiThreadedDecoder::add(cv::Mat mat)
 
 		if (decodeRes >= _successCondition)
 			++perfect;
-	} );
+	}, _maxBacklog );
+
+	switch (status)
+	{
+		case turbo::thread_pool::enqueue_status::over_limit:
+			++dropped;
+			return FrameStatus::Dropped;
+		case turbo::thread_pool::enqueue_status::full:
+			++queueFull;
+			return FrameStatus::QueueFull;
+		default:
+			return FrameStatus::Enqueued;
+	}
 }
 
 inline void MultiThreadedDecoder::save(const cv::Mat& mat)
@@ -193,6 +215,21 @@ inline unsigned MultiThreadedDecoder::num_threads() const
 inline unsigned MultiThreadedDecoder::backlog() const
 {
 	return _pool.queued();
+}
+
+inline unsigned MultiThreadedDecoder::max_backlog() const
+{
+	return _maxBacklog;
+}
+
+inline void MultiThreadedDecoder::set_max_backlog(unsigned max_backlog)
+{
+	_maxBacklog = max_backlog;
+}
+
+inline unsigned MultiThreadedDecoder::frames_dropped() const
+{
+	return dropped + queueFull;
 }
 
 inline unsigned MultiThreadedDecoder::files_in_flight() const
