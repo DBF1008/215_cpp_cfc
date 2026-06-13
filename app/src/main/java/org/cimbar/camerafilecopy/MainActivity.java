@@ -8,7 +8,9 @@ import org.opencv.android.CameraBridgeViewBase;
 import org.opencv.android.CameraBridgeViewBase.CvCameraViewListener2;
 
 import android.annotation.SuppressLint;
+import android.app.AlertDialog;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.GestureDetector;
@@ -22,6 +24,7 @@ import androidx.core.view.GestureDetectorCompat;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Collections;
@@ -30,6 +33,8 @@ import java.util.List;
 public class MainActivity extends CameraActivity implements CvCameraViewListener2 {
     private static final String TAG = "cfc::MainActivity";
     private static final int CREATE_FILE = 11;
+    static final String BUNDLE_KEY_ACTIVE_PATH = "activePath";
+    static final String BUNDLE_KEY_PENDING_SAVE_PATH = "pendingSavePath";
 
     private GestureDetectorCompat mDetector;
     private Toast introToast;
@@ -40,6 +45,7 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     private int detectedMode = 68;
     private String dataPath;
     private String activePath;
+    private String pendingSavePath;
 
     public MainActivity() {
         Log.i(TAG, "Instantiated new " + this.getClass());
@@ -69,6 +75,12 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
         this.dataPath = this.getFilesDir().getPath();
         //this.dataPath = this.getExternalFilesDir(null).getPath(); // for manual testing
+
+        // Restore state across Activity recreations (e.g. process death during file picker)
+        if (savedInstanceState != null) {
+            this.activePath = savedInstanceState.getString(BUNDLE_KEY_ACTIVE_PATH, null);
+            this.pendingSavePath = savedInstanceState.getString(BUNDLE_KEY_PENDING_SAVE_PATH, null);
+        }
 
         setContentView(R.layout.activity_main);
 
@@ -105,6 +117,15 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     }
 
     @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (this.activePath != null)
+            outState.putString(BUNDLE_KEY_ACTIVE_PATH, this.activePath);
+        if (this.pendingSavePath != null)
+            outState.putString(BUNDLE_KEY_PENDING_SAVE_PATH, this.pendingSavePath);
+    }
+
+    @Override
     public void onPause()
     {
         shutdownJNI();
@@ -119,6 +140,22 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
         super.onResume();
         if (mOpenCvCameraView != null)
             mOpenCvCameraView.enableView();
+
+        // If a previous save attempt failed (e.g. process death during file picker),
+        // offer to retry now that the Activity is back.
+        if (this.pendingSavePath != null) {
+            final String path = this.pendingSavePath;
+            new AlertDialog.Builder(this)
+                .setTitle("Save failed")
+                .setMessage("The previous file transfer could not be saved. Try again?")
+                .setPositiveButton("Retry", (dialog, which) -> retrySave(path))
+                .setNegativeButton("Discard", (dialog, which) -> {
+                    try { new File(path).delete(); } catch (Exception e) {}
+                    this.pendingSavePath = null;
+                })
+                .setCancelable(false)
+                .show();
+        }
     }
 
     @Override
@@ -187,32 +224,154 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
         return mat;
     }
 
+    /** Outcome of a CREATE_FILE activity result, used to drive state transitions. */
+    enum SaveOutcome {
+        IGNORED,            // not our request code
+        CANCELLED,          // user cancelled the picker
+        NO_SOURCE,          // activePath was lost (recreation race)
+        PENDING_NO_DATA,    // OK but data Intent is null — preserve for retry
+        PENDING_NO_URI,     // OK but Uri is null — preserve for retry
+        SAVE_OK,            // copy succeeded
+        SAVE_FAILED         // copy threw — preserve for retry
+    }
+
+    /**
+     * Pure decision function: given the activity-result inputs and whether the copy
+     * succeeded (ignored when not applicable), determine what happened.
+     * This method has no side effects and is unit-tested directly.
+     */
+    static SaveOutcome determineSaveOutcome(int requestCode, int resultCode,
+                                            @Nullable Intent data,
+                                            @Nullable String activePath,
+                                            boolean copySucceeded) {
+        if (requestCode != CREATE_FILE)
+            return SaveOutcome.IGNORED;
+
+        if (resultCode != RESULT_OK)
+            return SaveOutcome.CANCELLED;
+
+        if (activePath == null)
+            return SaveOutcome.NO_SOURCE;
+
+        if (data == null)
+            return SaveOutcome.PENDING_NO_DATA;
+
+        if (data.getData() == null)
+            return SaveOutcome.PENDING_NO_URI;
+
+        return copySucceeded ? SaveOutcome.SAVE_OK : SaveOutcome.SAVE_FAILED;
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        if (resultCode == RESULT_OK && requestCode == CREATE_FILE) {
-            if (this.activePath == null)
+        final String srcPath = this.activePath;
+
+        // Determine the copy result upfront if we'll need it for the decision
+        boolean copySucceeded = false;
+        if (requestCode == CREATE_FILE && resultCode == RESULT_OK
+                && srcPath != null && data != null && data.getData() != null) {
+            copySucceeded = copyFileToUri(srcPath, data.getData());
+        }
+
+        SaveOutcome outcome = determineSaveOutcome(requestCode, resultCode, data, srcPath, copySucceeded);
+
+        switch (outcome) {
+            case IGNORED:
                 return;
 
-            // copy this.activePath (tempfile) to the user-specified location
-            try (
-                    InputStream istream = new FileInputStream(this.activePath);
-                    OutputStream ostream = getContentResolver().openOutputStream(data.getData())
-            ) {
-                byte[] buf = new byte[8192];
-                int length;
-                while ((length = istream.read(buf)) > 0) {
-                    ostream.write(buf, 0, length);
+            case CANCELLED:
+                if (srcPath != null) {
+                    try { new File(srcPath).delete(); } catch (Exception e) {}
+                    this.activePath = null;
                 }
-                ostream.flush();
-            } catch (Exception e) {
-                Log.e(TAG, "failed to write file " + e.toString());
-            } finally {
-                try {
-                    new File(this.activePath).delete();
-                } catch (Exception e) {}
+                return;
+
+            case NO_SOURCE:
+                Log.w(TAG, "onActivityResult: activePath lost after recreation");
+                return;
+
+            case PENDING_NO_DATA:
+                Log.w(TAG, "onActivityResult: data Intent is null; preserving temp file for retry");
+                this.pendingSavePath = srcPath;
                 this.activePath = null;
-            }
+                showToast("Save failed: no result data. You will be prompted to retry.");
+                return;
+
+            case PENDING_NO_URI:
+                Log.w(TAG, "onActivityResult: result Uri is null; preserving temp file for retry");
+                this.pendingSavePath = srcPath;
+                this.activePath = null;
+                showToast("Save failed: invalid destination. You will be prompted to retry.");
+                return;
+
+            case SAVE_OK:
+                try { new File(srcPath).delete(); } catch (Exception e) {}
+                this.activePath = null;
+                this.pendingSavePath = null;
+                showToast("File saved successfully");
+                return;
+
+            case SAVE_FAILED:
+                this.pendingSavePath = srcPath;
+                this.activePath = null;
+                showToast("Save failed. You will be prompted to retry.");
+                return;
         }
+    }
+
+    /**
+     * Copy the temp file at {@code srcPath} to the given content {@code destUri}.
+     * Returns true only when every byte was written and the stream was flushed.
+     */
+    boolean copyFileToUri(String srcPath, Uri destUri) {
+        InputStream istream = null;
+        OutputStream ostream = null;
+        try {
+            istream = new FileInputStream(srcPath);
+            ostream = getContentResolver().openOutputStream(destUri);
+            if (ostream == null) {
+                Log.e(TAG, "openOutputStream returned null for " + destUri);
+                return false;
+            }
+            copyStream(istream, ostream);
+            ostream.flush();
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "failed to write file: " + e.toString());
+            return false;
+        } finally {
+            try { if (istream != null) istream.close(); } catch (IOException e) {}
+            try { if (ostream != null) ostream.close(); } catch (IOException e) {}
+        }
+    }
+
+    /** Pure byte-copy between two streams. Package-visible for unit testing. */
+    static void copyStream(InputStream in, OutputStream out) throws IOException {
+        byte[] buf = new byte[8192];
+        int length;
+        while ((length = in.read(buf)) > 0) {
+            out.write(buf, 0, length);
+        }
+    }
+
+    /** Re-launch the file picker for a previously-failed save attempt. */
+    private void retrySave(String srcPath) {
+        this.pendingSavePath = null;
+        File f = new File(srcPath);
+        if (!f.exists()) {
+            showToast("Temp file no longer exists, cannot retry.");
+            return;
+        }
+        this.activePath = srcPath;
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/octet-stream");
+        intent.putExtra(Intent.EXTRA_TITLE, f.getName());
+        startActivityForResult(intent, CREATE_FILE);
+    }
+
+    private void showToast(String msg) {
+        runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show());
     }
 
     private native String processImageJNI(long mat, String path, int modeInt);
