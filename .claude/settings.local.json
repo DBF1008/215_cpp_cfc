@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//usr/lib/**)",
+      "Read(//usr/local/lib/**)",
+      "Read(//opt/**)",
+      "Bash(echo $JAVA_HOME)",
+      "Bash(echo $ANDROID_HOME)"
+    ]
+  }
+}

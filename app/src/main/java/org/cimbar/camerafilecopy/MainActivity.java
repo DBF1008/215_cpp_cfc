@@ -9,6 +9,7 @@ import org.opencv.android.CameraBridgeViewBase.CvCameraViewListener2;
 
 import android.annotation.SuppressLint;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.GestureDetector;
@@ -20,7 +21,6 @@ import android.widget.Toast;
 import androidx.annotation.Nullable;
 import androidx.core.view.GestureDetectorCompat;
 
-import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -39,7 +39,7 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     private int modeVal = 0;
     private int detectedMode = 68;
     private String dataPath;
-    private String activePath;
+    private SaveCoordinator saveCoordinator;
 
     public MainActivity() {
         Log.i(TAG, "Instantiated new " + this.getClass());
@@ -69,6 +69,23 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
         this.dataPath = this.getFilesDir().getPath();
         //this.dataPath = this.getExternalFilesDir(null).getPath(); // for manual testing
+
+        // Initialize the save coordinator with a listener that marshals to the UI thread
+        saveCoordinator = new SaveCoordinator(new SaveCoordinator.SaveCoordinatorListener() {
+            @Override
+            public void requestSaveLocation(final String filename) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        intent.setType("application/octet-stream");
+                        intent.putExtra(Intent.EXTRA_TITLE, filename);
+                        startActivityForResult(intent, CREATE_FILE);
+                    }
+                });
+            }
+        });
 
         setContentView(R.layout.activity_main);
 
@@ -111,6 +128,8 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
         super.onPause();
         if (mOpenCvCameraView != null)
             mOpenCvCameraView.disableView();
+        // Cancel any pending save dialog if the user navigates away
+        saveCoordinator.onSaveCancelled();
     }
 
     @Override
@@ -174,13 +193,7 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
         }
         else if (!res.isEmpty()) {
-            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("application/octet-stream");
-            intent.putExtra(Intent.EXTRA_TITLE, res);
-            // can't get putExtra to work for extra values, so we'll save it in the class
-            this.activePath = this.dataPath + "/" + res;
-            startActivityForResult(intent, CREATE_FILE);
+            saveCoordinator.onFrameResult(this.dataPath + "/" + res, res);
         }
 
         // return processed frame for live preview
@@ -189,29 +202,36 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        if (resultCode == RESULT_OK && requestCode == CREATE_FILE) {
-            if (this.activePath == null)
-                return;
+        if (requestCode != CREATE_FILE)
+            return;
 
-            // copy this.activePath (tempfile) to the user-specified location
-            try (
-                    InputStream istream = new FileInputStream(this.activePath);
-                    OutputStream ostream = getContentResolver().openOutputStream(data.getData())
-            ) {
-                byte[] buf = new byte[8192];
-                int length;
-                while ((length = istream.read(buf)) > 0) {
-                    ostream.write(buf, 0, length);
+        if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+            final Uri destUri = data.getData();
+            saveCoordinator.onSaveLocationAvailable(new Runnable() {
+                @Override
+                public void run() {
+                    String sourcePath = saveCoordinator.getCurrentFullPath();
+                    if (sourcePath == null)
+                        return;
+
+                    // copy the temp file to the user-specified location
+                    try (
+                            InputStream istream = new FileInputStream(sourcePath);
+                            OutputStream ostream = getContentResolver().openOutputStream(destUri)
+                    ) {
+                        byte[] buf = new byte[8192];
+                        int length;
+                        while ((length = istream.read(buf)) > 0) {
+                            ostream.write(buf, 0, length);
+                        }
+                        ostream.flush();
+                    } catch (Exception e) {
+                        Log.e(TAG, "failed to write file " + e.toString());
+                    }
                 }
-                ostream.flush();
-            } catch (Exception e) {
-                Log.e(TAG, "failed to write file " + e.toString());
-            } finally {
-                try {
-                    new File(this.activePath).delete();
-                } catch (Exception e) {}
-                this.activePath = null;
-            }
+            });
+        } else {
+            saveCoordinator.onSaveCancelled();
         }
     }
 
