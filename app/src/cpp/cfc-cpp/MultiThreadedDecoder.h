@@ -17,14 +17,17 @@ class MultiThreadedDecoder
 public:
 	MultiThreadedDecoder(std::string data_path, int mode_val);
 
-	inline static clock_t count = 0;
-	inline static clock_t bytes = 0;
-	inline static clock_t perfect = 0;
-	inline static clock_t decoded = 0;
-	inline static clock_t decodeTicks = 0;
-	inline static clock_t scanned = 0;
-	inline static clock_t scanTicks = 0;
-	inline static clock_t extractTicks = 0;
+	// session-level counters — reset to 0 for each new instance
+	clock_t count = 0;
+	clock_t bytes = 0;
+	clock_t perfect = 0;
+	clock_t decoded = 0;
+	clock_t decodeTicks = 0;
+	clock_t scanned = 0;
+	clock_t scanTicks = 0;
+	clock_t extractTicks = 0;
+
+	void reset_stats();
 
 	bool add(cv::Mat mat);
 
@@ -71,6 +74,18 @@ inline MultiThreadedDecoder::MultiThreadedDecoder(std::string data_path, int mod
 {
 	FountainInit::init();
 	_pool.start();
+}
+
+inline void MultiThreadedDecoder::reset_stats()
+{
+	count = 0;
+	bytes = 0;
+	perfect = 0;
+	decoded = 0;
+	decodeTicks = 0;
+	scanned = 0;
+	scanTicks = 0;
+	extractTicks = 0;
 }
 
 inline int MultiThreadedDecoder::do_extract(const cv::Mat& mat, cv::Mat& img)
