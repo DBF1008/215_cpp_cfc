@@ -9,6 +9,7 @@ import org.opencv.android.CameraBridgeViewBase.CvCameraViewListener2;
 
 import android.annotation.SuppressLint;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.GestureDetector;
@@ -39,7 +40,7 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     private int modeVal = 0;
     private int detectedMode = 68;
     private String dataPath;
-    private String activePath;
+    private PendingSaveQueue saveQueue;
 
     public MainActivity() {
         Log.i(TAG, "Instantiated new " + this.getClass());
@@ -69,6 +70,20 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
         this.dataPath = this.getFilesDir().getPath();
         //this.dataPath = this.getExternalFilesDir(null).getPath(); // for manual testing
+
+        // Serializes completed-file saves: one chooser at a time, launched on the UI thread, with
+        // queued completions so none are dropped (the native side reports each file only once).
+        saveQueue = new PendingSaveQueue(new PendingSaveQueue.SaveLauncher() {
+            @Override
+            public void launchSave(final String tempFilePath) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        promptSaveFile(tempFilePath);
+                    }
+                });
+            }
+        });
 
         setContentView(R.layout.activity_main);
 
@@ -174,13 +189,11 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
         }
         else if (!res.isEmpty()) {
-            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("application/octet-stream");
-            intent.putExtra(Intent.EXTRA_TITLE, res);
-            // can't get putExtra to work for extra values, so we'll save it in the class
-            this.activePath = this.dataPath + "/" + res;
-            startActivityForResult(intent, CREATE_FILE);
+            // A file finished transferring. onCameraFrame runs on the camera thread, and the native
+            // decoder reports each completed file exactly once, so we must not launch the chooser
+            // directly here (wrong thread, and a second completion mid-save would stack dialogs or
+            // clobber the path). Hand it to the queue, which serializes the saves on the UI thread.
+            saveQueue.offer(this.dataPath + "/" + res);
         }
 
         // return processed frame for live preview
@@ -189,29 +202,50 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        if (resultCode == RESULT_OK && requestCode == CREATE_FILE) {
-            if (this.activePath == null)
-                return;
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != CREATE_FILE)
+            return;
 
-            // copy this.activePath (tempfile) to the user-specified location
-            try (
-                    InputStream istream = new FileInputStream(this.activePath);
-                    OutputStream ostream = getContentResolver().openOutputStream(data.getData())
-            ) {
-                byte[] buf = new byte[8192];
-                int length;
-                while ((length = istream.read(buf)) > 0) {
-                    ostream.write(buf, 0, length);
-                }
-                ostream.flush();
-            } catch (Exception e) {
-                Log.e(TAG, "failed to write file " + e.toString());
-            } finally {
+        // Exactly one save is in flight at a time, so activePath identifies its temp file.
+        final String tempFilePath = saveQueue.activePath();
+        try {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null && tempFilePath != null)
+                copyToUri(tempFilePath, data.getData());
+        } finally {
+            // Whatever happened (saved, cancelled, or failed), drop the temp file and reopen the
+            // gate so the next completed transfer waiting in the queue can be saved.
+            if (tempFilePath != null) {
                 try {
-                    new File(this.activePath).delete();
-                } catch (Exception e) {}
-                this.activePath = null;
+                    new File(tempFilePath).delete();
+                } catch (Exception e) { /* best-effort cleanup */ }
             }
+            saveQueue.onSaveResolved();
+        }
+    }
+
+    /** Show the system "create document" chooser for a completed temp file. Runs on the UI thread. */
+    private void promptSaveFile(String tempFilePath) {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/octet-stream");
+        intent.putExtra(Intent.EXTRA_TITLE, new File(tempFilePath).getName());
+        startActivityForResult(intent, CREATE_FILE);
+    }
+
+    /** Copy the received temp file to the user-chosen destination. */
+    private void copyToUri(String tempFilePath, Uri dest) {
+        try (
+                InputStream istream = new FileInputStream(tempFilePath);
+                OutputStream ostream = getContentResolver().openOutputStream(dest)
+        ) {
+            byte[] buf = new byte[8192];
+            int length;
+            while ((length = istream.read(buf)) > 0) {
+                ostream.write(buf, 0, length);
+            }
+            ostream.flush();
+        } catch (Exception e) {
+            Log.e(TAG, "failed to write file " + e.toString());
         }
     }
 
