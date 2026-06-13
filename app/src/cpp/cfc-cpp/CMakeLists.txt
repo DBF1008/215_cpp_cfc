@@ -5,6 +5,7 @@ add_library(cfc-cpp
 
         jni.cpp
         MultiThreadedDecoder.h
+        JniSessionState.h
 )
 
 find_library(log-lib
@@ -25,3 +26,7 @@ target_link_libraries(cfc-cpp
 )
 
 target_compile_options(cfc-cpp  PUBLIC "-DZSTD_STATIC_LINKING_ONLY")
+
+if(NOT DEFINED DISABLE_TESTS)
+    add_subdirectory(test)
+endif()

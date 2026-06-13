@@ -1,4 +1,5 @@
 #include "MultiThreadedDecoder.h"
+#include "JniSessionState.h"
 #include "cimb_translator/CimbDecoder.h"
 #include "cimb_translator/CimbReader.h"
 #include "encoder/Decoder.h"
@@ -22,12 +23,7 @@ using namespace cv;
 namespace {
 	std::shared_ptr<MultiThreadedDecoder> _proc;
 	std::mutex _mutex; // for _proc
-	std::set<std::string> _completed;
-
-	unsigned _calls = 0;
-	int _transferStatus = 0;
-	clock_t _frameDecodeSnapshot = 0;
-	clock_t _frameSuccessSnapshot = 0;
+	JniSessionState _session;
 
 	unsigned millis(unsigned num, unsigned denom)
 	{
@@ -127,7 +123,7 @@ namespace {
 		sstop << "cfc using " << proc.num_threads() << " thread(s). " << proc.mode() << ":" << proc.detected_mode() << "..." << proc.backlog() << "? ";
 		sstop << (MultiThreadedDecoder::bytes / std::max<double>(1, MultiThreadedDecoder::decoded)) << "b v0.6.6";
 		std::stringstream ssmid;
-		ssmid << "#: " << MultiThreadedDecoder::perfect << " / " << MultiThreadedDecoder::decoded << " / " << MultiThreadedDecoder::scanned << " / " << _calls;
+		ssmid << "#: " << MultiThreadedDecoder::perfect << " / " << MultiThreadedDecoder::decoded << " / " << MultiThreadedDecoder::scanned << " / " << _session.calls;
 		std::stringstream ssperf;
 		ssperf << "scan: " << millis(MultiThreadedDecoder::scanTicks, MultiThreadedDecoder::scanned);
 		ssperf << ", extract: " << millis(MultiThreadedDecoder::extractTicks, MultiThreadedDecoder::decoded);
@@ -152,6 +148,12 @@ namespace {
 		//*/
 	}
 
+	void resetSessionState()
+	{
+		// _proc must already be stopped before calling this function.
+		_session.reset();
+	}
+
 	std::string jstring_to_cppstr(JNIEnv *env, const jstring& dataPathObj)
 	{
 		const char* temp = env->GetStringUTFChars(dataPathObj, NULL);
@@ -165,7 +167,7 @@ extern "C" {
 jstring JNICALL
 Java_org_cimbar_camerafilecopy_MainActivity_processImageJNI(JNIEnv *env, jobject instance, jlong matAddr, jstring dataPathObj, jint modeInt)
 {
-	++_calls;
+	++_session.calls;
 
 	// get params from raw address
 	Mat &mat = *(Mat *) matAddr;
@@ -184,18 +186,18 @@ Java_org_cimbar_camerafilecopy_MainActivity_processImageJNI(JNIEnv *env, jobject
 	cv::Mat img = mat.clone();
 	proc->add(img);
 
-	if ((_calls & 31) == 1)
+	if ((_session.calls & 31) == 1)
 	{
 		clock_t decodeSnapshot = proc->decoded;
 		clock_t perfectSnapshot = proc->perfect;
-		_transferStatus = perfectSnapshot > _frameSuccessSnapshot; // a bit silly, but 1 == partial decode
-		_transferStatus += (decodeSnapshot > _frameDecodeSnapshot); // 2 == full decode
-		_frameDecodeSnapshot = decodeSnapshot;
-		_frameSuccessSnapshot = perfectSnapshot;
+		_session.transferStatus = perfectSnapshot > _session.frameSuccessSnapshot; // a bit silly, but 1 == partial decode
+		_session.transferStatus += (decodeSnapshot > _session.frameDecodeSnapshot); // 2 == full decode
+		_session.frameDecodeSnapshot = decodeSnapshot;
+		_session.frameSuccessSnapshot = perfectSnapshot;
 	}
 
 	drawProgress(mat, proc->get_progress());
-	drawGuidance(mat, _transferStatus);
+	drawGuidance(mat, _session.transferStatus);
 	//drawDebugInfo(mat, *proc);
 
 	// log computation time to Android Logcat
@@ -210,9 +212,9 @@ Java_org_cimbar_camerafilecopy_MainActivity_processImageJNI(JNIEnv *env, jobject
 
 	std::vector<string> all_decodes = proc->get_done();
 	for (string& s : all_decodes)
-		if (_completed.find(s) == _completed.end())
+		if (_session.completed.find(s) == _session.completed.end())
 		{
-			_completed.insert(s);
+			_session.completed.insert(s);
 			result = s;
 		}
 	return env->NewStringUTF(result.c_str());
@@ -226,6 +228,7 @@ Java_org_cimbar_camerafilecopy_MainActivity_shutdownJNI(JNIEnv *env, jobject ins
 	if (_proc)
 		_proc->stop();
 	_proc = nullptr;
+	resetSessionState();
 }
 
 }
