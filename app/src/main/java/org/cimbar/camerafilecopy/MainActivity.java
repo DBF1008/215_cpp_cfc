@@ -107,15 +107,19 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     @Override
     public void onPause()
     {
-        shutdownJNI();
-        super.onPause();
+        // Stop the camera (this joins the frame-delivery thread) BEFORE tearing down
+        // the native decoder, so no in-flight frame can race in and resurrect it.
         if (mOpenCvCameraView != null)
             mOpenCvCameraView.disableView();
+        shutdownJNI();
+        super.onPause();
     }
 
     @Override
     public void onResume()
     {
+        // Re-arm the native decoder session before frames start flowing again.
+        startupJNI();
         super.onResume();
         if (mOpenCvCameraView != null)
             mOpenCvCameraView.enableView();
@@ -128,10 +132,10 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
 
     @Override
     public void onDestroy() {
-        shutdownJNI();
-        super.onDestroy();
         if (mOpenCvCameraView != null)
             mOpenCvCameraView.disableView();
+        shutdownJNI();
+        super.onDestroy();
     }
 
     @Override
@@ -216,6 +220,7 @@ public class MainActivity extends CameraActivity implements CvCameraViewListener
     }
 
     private native String processImageJNI(long mat, String path, int modeInt);
+    private native void startupJNI();
     private native void shutdownJNI();
 
     @Override

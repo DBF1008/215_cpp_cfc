@@ -1,4 +1,5 @@
 #include "MultiThreadedDecoder.h"
+#include "DecoderSession.h"
 #include "cimb_translator/CimbDecoder.h"
 #include "cimb_translator/CimbReader.h"
 #include "encoder/Decoder.h"
@@ -11,7 +12,6 @@
 #include <opencv2/core/ocl.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <memory>
-#include <mutex>
 #include <sstream>
 
 #define TAG "CameraFileCopyCPP"
@@ -20,8 +20,7 @@ using namespace std;
 using namespace cv;
 
 namespace {
-	std::shared_ptr<MultiThreadedDecoder> _proc;
-	std::mutex _mutex; // for _proc
+	DecoderSession<MultiThreadedDecoder> _session;
 	std::set<std::string> _completed;
 
 	unsigned _calls = 0;
@@ -172,13 +171,12 @@ Java_org_cimbar_camerafilecopy_MainActivity_processImageJNI(JNIEnv *env, jobject
 	string dataPath = jstring_to_cppstr(env, dataPathObj);
 	int modeVal = (int)modeInt;
 
-	std::shared_ptr<MultiThreadedDecoder> proc;
-	{
-		std::lock_guard<std::mutex> lock(_mutex);
-		if (!_proc or !_proc->set_mode(modeVal))
-			_proc = std::make_shared<MultiThreadedDecoder>(dataPath, modeVal);
-		proc = _proc;
-	}
+	std::shared_ptr<MultiThreadedDecoder> proc = _session.get_or_create(
+		[&](MultiThreadedDecoder& dec) { return dec.set_mode(modeVal); },
+		[&]() { return std::make_shared<MultiThreadedDecoder>(dataPath, modeVal); }
+	);
+	if (!proc) // session is shutting down -- drop this late frame
+		return env->NewStringUTF("");
 
 	clock_t begin = clock();
 	cv::Mat img = mat.clone();
@@ -219,13 +217,15 @@ Java_org_cimbar_camerafilecopy_MainActivity_processImageJNI(JNIEnv *env, jobject
 }
 
 void JNICALL
+Java_org_cimbar_camerafilecopy_MainActivity_startupJNI(JNIEnv *env, jobject instance) {
+	__android_log_print(ANDROID_LOG_INFO, TAG, "Startup cfc-cpp\n");
+	_session.startup();
+}
+
+void JNICALL
 Java_org_cimbar_camerafilecopy_MainActivity_shutdownJNI(JNIEnv *env, jobject instance) {
 	__android_log_print(ANDROID_LOG_INFO, TAG, "Shutdown cfc-cpp\n");
-
-	std::lock_guard<std::mutex> lock(_mutex);
-	if (_proc)
-		_proc->stop();
-	_proc = nullptr;
+	_session.shutdown([](MultiThreadedDecoder& dec) { dec.stop(); });
 }
 
 }

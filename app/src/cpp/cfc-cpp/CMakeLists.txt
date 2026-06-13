@@ -25,3 +25,7 @@ target_link_libraries(cfc-cpp
 )
 
 target_compile_options(cfc-cpp  PUBLIC "-DZSTD_STATIC_LINKING_ONLY")
+
+if(NOT DEFINED DISABLE_TESTS)
+        add_subdirectory(test)
+endif()

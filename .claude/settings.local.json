@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(g++ --version)",
+      "Bash(g++ -std=c++17 -I app/src/cpp/cfc-cpp -I app/src/cpp/libcimbar/test app/src/cpp/cfc-cpp/test/test.cpp app/src/cpp/cfc-cpp/test/DecoderSessionTest.cpp -lpthread -o /tmp/cfc_cpp_test)",
+      "Bash(/tmp/cfc_cpp_test)"
+    ]
+  }
+}
