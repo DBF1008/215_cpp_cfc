@@ -26,6 +26,7 @@ namespace {
 
 	unsigned _calls = 0;
 	int _transferStatus = 0;
+	int _dropping = 0;
 	clock_t _frameDecodeSnapshot = 0;
 	clock_t _frameSuccessSnapshot = 0;
 
@@ -53,7 +54,9 @@ namespace {
 		int outlineOffset = (outlineWidth - guideWidth) >> 1;
 
 		cv::Scalar color = cv::Scalar(255,255,255);
-		if (in_progress == 1)
+		if (in_progress == -1)
+			color = cv::Scalar(0,0,255); // red: dropping frames
+		else if (in_progress == 1)
 			color = cv::Scalar(255,244,94); // 0,191,255
 		else if (in_progress == 2)
 			color = cv::Scalar(0,255,0);
@@ -127,7 +130,7 @@ namespace {
 		sstop << "cfc using " << proc.num_threads() << " thread(s). " << proc.mode() << ":" << proc.detected_mode() << "..." << proc.backlog() << "? ";
 		sstop << (MultiThreadedDecoder::bytes / std::max<double>(1, MultiThreadedDecoder::decoded)) << "b v0.6.6";
 		std::stringstream ssmid;
-		ssmid << "#: " << MultiThreadedDecoder::perfect << " / " << MultiThreadedDecoder::decoded << " / " << MultiThreadedDecoder::scanned << " / " << _calls;
+		ssmid << "#: " << MultiThreadedDecoder::perfect << " / " << MultiThreadedDecoder::decoded << " / " << MultiThreadedDecoder::scanned << " / " << _calls << " / " << proc.dropped() << "d";
 		std::stringstream ssperf;
 		ssperf << "scan: " << millis(MultiThreadedDecoder::scanTicks, MultiThreadedDecoder::scanned);
 		ssperf << ", extract: " << millis(MultiThreadedDecoder::extractTicks, MultiThreadedDecoder::decoded);
@@ -135,7 +138,8 @@ namespace {
 		std::stringstream sstats;
 		sstats << "Files received: " << proc.files_decoded() << ", in flight: " << proc.files_in_flight() << ". ";
 		sstats << percent(MultiThreadedDecoder::perfect, MultiThreadedDecoder::decoded) << "% decode. ";
-		sstats << percent(MultiThreadedDecoder::decoded, MultiThreadedDecoder::scanned) << "% scan.";
+		sstats << percent(MultiThreadedDecoder::decoded, MultiThreadedDecoder::scanned) << "% scan. ";
+		sstats << proc.dropped() << " dropped.";
 
 		cv::putText(mat, sstop.str(), cv::Point(5,50), cv::FONT_HERSHEY_DUPLEX, 1, cv::Scalar(255,255,80), 2);
 		cv::putText(mat, ssmid.str(), cv::Point(5,100), cv::FONT_HERSHEY_DUPLEX, 1, cv::Scalar(255,255,80), 2);
@@ -182,7 +186,17 @@ Java_org_cimbar_camerafilecopy_MainActivity_processImageJNI(JNIEnv *env, jobject
 
 	clock_t begin = clock();
 	cv::Mat img = mat.clone();
-	proc->add(img);
+	auto addResult = proc->add(img);
+
+	if (addResult == MultiThreadedDecoder::AddResult::QueueFull) {
+		++_dropping;
+		if (_dropping == 1 || (_dropping % 100) == 0)
+			__android_log_print(ANDROID_LOG_WARN, TAG,
+				"Frame dropped (queue full): %u total drops out of %u frames, backlog=%u\n",
+				proc->dropped(), (unsigned)_calls, proc->backlog());
+	} else {
+		_dropping = 0;
+	}
 
 	if ((_calls & 31) == 1)
 	{
@@ -195,13 +209,14 @@ Java_org_cimbar_camerafilecopy_MainActivity_processImageJNI(JNIEnv *env, jobject
 	}
 
 	drawProgress(mat, proc->get_progress());
-	drawGuidance(mat, _transferStatus);
+	drawGuidance(mat, _dropping > 0 ? -1 : _transferStatus);
 	//drawDebugInfo(mat, *proc);
 
-	// log computation time to Android Logcat
+	// log computation time and backpressure to Android Logcat
 	double totalTime = double(clock() - begin) / CLOCKS_PER_SEC;
-	__android_log_print(ANDROID_LOG_INFO, TAG, "processImage computation time = %f seconds\n",
-						totalTime);
+	__android_log_print(ANDROID_LOG_INFO, TAG,
+		"processImage: %.3fs, frames=%u, enqueued=%u, dropped=%u, backlog=%u\n",
+		totalTime, (unsigned)_calls, proc->enqueued(), proc->dropped(), proc->backlog());
 
 	// return a decoded file to prompt the user to save it, if there is a new one
 	string result;

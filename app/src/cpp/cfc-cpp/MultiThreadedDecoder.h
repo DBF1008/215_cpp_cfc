@@ -10,11 +10,14 @@
 
 #include "concurrent/thread_pool.h"
 #include <opencv2/opencv.hpp>
+#include <atomic>
 #include <fstream>
 
 class MultiThreadedDecoder
 {
 public:
+	enum class AddResult { Queued, QueueFull, Stopped };
+
 	MultiThreadedDecoder(std::string data_path, int mode_val);
 
 	inline static clock_t count = 0;
@@ -26,7 +29,7 @@ public:
 	inline static clock_t scanTicks = 0;
 	inline static clock_t extractTicks = 0;
 
-	bool add(cv::Mat mat);
+	AddResult add(cv::Mat mat);
 
 	void stop();
 
@@ -36,6 +39,8 @@ public:
 
 	unsigned num_threads() const;
 	unsigned backlog() const;
+	unsigned enqueued() const;
+	unsigned dropped() const;
 	unsigned files_in_flight() const;
 	unsigned files_decoded() const;
 	std::vector<std::string> get_done() const;
@@ -54,6 +59,8 @@ protected:
 	Decoder _dec;
 	unsigned _numThreads;
 	turbo::thread_pool _pool;
+	std::atomic<unsigned> _enqueued{0};
+	std::atomic<unsigned> _dropped{0};
 	concurrent_fountain_decoder_sink _writer;
 	std::string _dataPath;
 	unsigned _successCondition;
@@ -96,7 +103,7 @@ inline int MultiThreadedDecoder::do_extract(const cv::Mat& mat, cv::Mat& img)
 	return Extractor::SUCCESS;
 }
 
-inline bool MultiThreadedDecoder::add(cv::Mat mat)
+inline MultiThreadedDecoder::AddResult MultiThreadedDecoder::add(cv::Mat mat)
 {
     ++count;
     unsigned modeVal = _modeVal;
@@ -116,7 +123,7 @@ inline bool MultiThreadedDecoder::add(cv::Mat mat)
                 modeVal = 68;
         }
     }
-    return _pool.try_execute( [&, mat, modeVal] () {
+    bool ok = _pool.try_execute( [&, mat, modeVal] () {
 		cimbar::Config::update(modeVal);
 		cv::Mat img;
 		int res = do_extract(mat, img);
@@ -138,6 +145,12 @@ inline bool MultiThreadedDecoder::add(cv::Mat mat)
 		if (decodeRes >= _successCondition)
 			++perfect;
 	} );
+	if (ok) {
+		++_enqueued;
+		return AddResult::Queued;
+	}
+	++_dropped;
+	return AddResult::QueueFull;
 }
 
 inline void MultiThreadedDecoder::save(const cv::Mat& mat)
@@ -193,6 +206,16 @@ inline unsigned MultiThreadedDecoder::num_threads() const
 inline unsigned MultiThreadedDecoder::backlog() const
 {
 	return _pool.queued();
+}
+
+inline unsigned MultiThreadedDecoder::enqueued() const
+{
+	return _enqueued.load(std::memory_order_relaxed);
+}
+
+inline unsigned MultiThreadedDecoder::dropped() const
+{
+	return _dropped.load(std::memory_order_relaxed);
 }
 
 inline unsigned MultiThreadedDecoder::files_in_flight() const
